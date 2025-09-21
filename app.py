@@ -434,9 +434,7 @@ def main():
 		unsafe_allow_html=True
 	)
 
-	use_example = st.sidebar.checkbox('Usar archivo de ejemplo (`matricula_general.csv`)', value=False)
 	uploaded_file = st.sidebar.file_uploader('Subir archivo (CSV/Excel/PDF)', type=['csv', 'xlsx', 'xls', 'pdf'])
-
 	df = None
 	if uploaded_file is not None:
 		# If uploaded, try to read according to extension
@@ -485,11 +483,6 @@ def main():
 				st.success(f'Tabla {idx} cargada desde PDF (filas: {len(df)})')
 		else:
 			st.warning('Tipo de archivo no soportado. Sube CSV, XLSX o PDF.')
-	elif use_example:
-		try:
-			df = read_csv_flexible(EXAMPLE_CSV)
-		except Exception as e:
-			st.error(f'No se pudo leer el archivo de ejemplo: {e}')
 
 	if df is None:
 		# Inicializar estado de navegación si no existe
