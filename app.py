@@ -877,7 +877,18 @@ def main():
 	def interpret_truthy(s: pd.Series) -> pd.Series:
 		# treat as True when value indicates yes/1/true or non-empty meaningful
 		if s is None:
-			return pd.Series([False]*0)
+			return pd.Series(dtype=bool)
+		# If a DataFrame was passed accidentally, use the first column
+		if isinstance(s, pd.DataFrame):
+			if s.shape[1] == 0:
+				return pd.Series(dtype=bool)
+			# choose the first column and warn in logs
+			try:
+				import logging
+				logging.getLogger(__name__).warning('interpret_truthy received a DataFrame; using first column for interpretation')
+			except Exception:
+				pass
+			s = s.iloc[:, 0]
 		ser = s.astype(str).str.strip().str.lower().replace({'nan':'', 'none':''})
 		truthy = ser.isin(['1','1.0','si','sí','s','true','t','yes','y']) | (~ser.isin(['', '0', '0.0', 'no', 'false', 'n']))
 		# If column seems numeric, treat >0 as True
