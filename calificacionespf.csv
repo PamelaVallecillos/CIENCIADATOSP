@@ -1,0 +1,19 @@
+nombre_del_alumno;dni_estudiante;periodo_escolar;carrera;jornada;grado;seccion;inicio_de_anio;fin_de_anio;termino_anio;Biologia_recuperacion;Biologia_promedio ;educacion_fisica_y_deportes_recuperacion;educacion_fisica_y_deportes_promedio;espanol_recuperacion;espanol_promedio;fundamentos_de_psicologia_recuperacion;fundamentos_de_psicologia_promedio;fisica_recuperacion;fisica_promedio;historia_de_honduras_recuperacion;historia_de_honduras_promedio;Informatica_recuperacion;Informatica_promedio;ingles_recuperacion;ingles_promedio;matematica_recuperacion;matematica_promedio;quimica_recuperacion;quimica_promedio;sociologia_recuperacion;sociologia_promedio
+María Fernanda López Rodríguez;0101-2007-00123;2022;Informatica ;Matutina;Decimo;1-A;2/1/2022;30/11/2022;si;N/A;92;N/A;82;N/A;79;N/A;89;N/A;84;N/A;84;N/A;92;N/A;82;N/A;84;N/A;87;N/A;86
+Juan Carlos Hernández López;0101-2007-00298;2022;Informatica ;Matutina;Decimo;1-A;2/1/2022;30/11/2022;si;N/A;71;N/A;77;N/A;71;N/A;71;N/A;74;N/A;71;N/A;71;N/A;77;N/A;80;N/A;60;N/A;74
+Ana Sofía Martínez Castro;0101-2007-00451;2022;Informatica ;Matutina;Decimo;1-A;2/1/2022;30/11/2022;si;N/A;77;N/A;85;N/A;81;N/A;87;N/A;89;N/A;79;N/A;77;N/A;85;N/A;93;N/A;83;N/A;84
+Camila Alejandra Reyes Herrera;0101-2007-00987;2022;Informatica ;Matutina;Decimo;1-A;2/1/2022;30/11/2022;si;N/A;95;N/A;92;N/A;97;N/A;94;N/A;94;N/A;87;N/A;95;N/A;92;N/A;97;N/A;93;N/A;94
+José Alejandro Cruz Martínez;0101-2007-00612;2022;Informatica ;Matutina;Decimo;1-A;2/1/2022;30/11/2022;no;N/A;75;N/A;91;N/A;82;N/A;89;N/A;81;N/A;77;N/A;75;N/A;91;N/A;86;N/A;82;N/A;84
+Luis Fernando Ramírez Aguilar;0101-2007-00580;2022;Informatica ;Matutina;Decimo;1-A;2/1/2022;30/11/2022;si;N/A;90;N/A;88;N/A;94;N/A;88;N/A;93;N/A;80;N/A;90;N/A;88;N/A;95;N/A;85;N/A;90
+Valeria Isabel Gómez Rivera;0101-2008-00234;2022;Informatica ;Matutina;Decimo;1-A;2/1/2022;30/11/2022;si;N/A;82;N/A;82;N/A;80;N/A;77;N/A;79;N/A;79;N/A;82;N/A;82;N/A;85;N/A;78;N/A;82
+Carlos Andrés Pineda Torres;0101-2007-00347;2022;Informatica ;Matutina;Decimo;1-A;2/1/2022;30/11/2022;si;N/A;87;N/A;89;N/A;86;N/A;89;N/A;92;N/A;79;N/A;87;N/A;89;N/A;90;N/A;83;N/A;87
+Daniela Paola Aguilar Torres;0101-2007-00356;2022;Informatica ;Matutina;Decimo;1-A;2/1/2022;4/10/2022;no;N/A;87;N/A;84;N/A;83;N/A;92;N/A;84;N/A;79;N/A;87;N/A;84;N/A;85;N/A;84;N/A;87
+Gabriela Nicole Mendoza Chávez;0101-2007-00890;2022;Informatica ;Matutina;Decimo;1-A;2/1/2022;30/11/2022;si;N/A;70;N/A;82;N/A;75;N/A;75;N/A;81;N/A;75;N/A;70;N/A;82;N/A;83;N/A;82;N/A;79
+David Emmanuel López Herrera;0101-2005-00580;2022;Informatica ;Matutina;Decimo;1-A;2/1/2022;16/8/2022;no;N/A;92;N/A;82;N/A;79;N/A;89;N/A;84;N/A;84;N/A;92;N/A;82;N/A;84;N/A;87;N/A;86
+Ricardo Daniel Gómez Rivera;0101-2007-00802;2022;Informatica ;Matutina;Decimo;1-A;2/1/2022;30/11/2022;si;N/A;71;N/A;77;N/A;71;N/A;71;N/A;74;N/A;71;N/A;71;N/A;77;N/A;80;N/A;60;N/A;74
+Andrea Carolina Ramírez López;0101-2008-00772;2022;Informatica ;Matutina;Decimo;1-A;2/1/2022;30/11/2022;si;N/A;77;N/A;85;N/A;81;N/A;87;N/A;89;N/A;79;N/A;77;N/A;85;N/A;93;N/A;83;N/A;84
+Isabella Victoria Cruz Hernández;0101-2007-00543;2022;Informatica ;Matutina;Decimo;1-A;2/1/2022;20/8/2022;no;N/A;95;N/A;92;N/A;97;N/A;94;N/A;94;N/A;87;N/A;95;N/A;92;N/A;97;N/A;93;N/A;94
+Jorge Antonio Castillo Chávez;0101-2007-00271;2022;Informatica ;Matutina;Decimo;1-A;2/1/2022;30/11/2022;si;N/A;75;N/A;91;N/A;82;N/A;89;N/A;81;N/A;77;N/A;75;N/A;91;N/A;86;N/A;82;N/A;84
+Diego Alejandro Pérez Cárcamo;0101-2006-00609;2022;Informatica ;Matutina;Decimo;1-A;2/1/2022;1/8/2022;no;N/A;90;N/A;88;N/A;94;N/A;88;N/A;93;N/A;80;N/A;90;N/A;88;N/A;95;N/A;85;N/A;90
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;

@@ -26,10 +26,26 @@ import pdfplumber
 EXAMPLE_CSV = 'matricula_general.csv'
 
 
+def _coerce_arrow_compatible(df: pd.DataFrame) -> pd.DataFrame:
+	"""Return a copy of df with mixed/object columns coerced to string to avoid pyarrow conversion errors."""
+	if df is None or df.empty:
+		return df
+	out = df.copy()
+	for c in out.columns:
+		# if dtype is object, ensure everything is str
+		if out[c].dtype == 'object':
+			try:
+				out[c] = out[c].astype(str)
+			except Exception:
+				out[c] = out[c].apply(lambda x: '' if pd.isna(x) else str(x))
+	return out
+
+
+
+
 def read_csv_flexible(path_or_buffer):
 	"""Intentar leer CSV con distintos encodings y separadores comunes."""
 	# Ensure we can seek the buffer: if it's a stream, copy into BytesIO
-	from io import BytesIO
 	buf = path_or_buffer
 	try:
 		if hasattr(path_or_buffer, 'read'):
@@ -208,6 +224,104 @@ def extract_text_from_pdf(fileobj) -> str:
 	return '\n\n'.join(text_parts)
 
 
+def read_calificaciones_flexible(path_or_buffer):
+	"""Leer archivos de calificaciones con separadores comunes y devolver DataFrame.
+	Intenta detectar delimitador ';' o ',' y maneja encabezados desplazados.
+	"""
+	buf = path_or_buffer
+	try:
+		if hasattr(path_or_buffer, 'read'):
+			data = path_or_buffer.read()
+			buf = BytesIO(data)
+	except Exception:
+		buf = path_or_buffer
+
+	# Try semicolon first (example file uses ';')
+	for sep in [';', ',', '\t']:
+		try:
+			buf.seek(0)
+		except Exception:
+			pass
+		try:
+			df = pd.read_csv(buf, sep=sep, encoding='latin-1', engine='python')
+			# Heuristic: must contain a column with 'IDENTIDAD' or 'ALUMNO' or 'NOMBRE'
+			cols = [str(c).upper() for c in df.columns]
+			if any('IDENTIDAD' in c or 'NOMBRE' in c or 'ALUMNO' in c for c in cols):
+				return df
+		except Exception:
+			continue
+
+	try:
+		buf.seek(0)
+	except Exception:
+		pass
+	return pd.read_csv(buf, sep=';', encoding='latin-1', engine='python')
+
+
+def clean_calificaciones(df: pd.DataFrame) -> pd.DataFrame:
+	"""Normalizar columnas y extraer notas numéricas por materia.
+
+	Devuelve dataframe con columnas: identidad, nombre, y columnas de materias con valores numéricos.
+	"""
+	if df is None:
+		return df
+	df = df.copy()
+	# Normalize column names
+	df.columns = [str(c).strip() for c in df.columns]
+	# Try to find header row if file has multi-line headers (common in exported reports)
+	# If first row contains 'ALUMNO' or 'IDENTIDAD', treat as header
+	first_row = df.iloc[0].astype(str).str.upper().tolist()
+	if any('ALUMNO' in str(v) or 'IDENTIDAD' in str(v) or 'NOMBRE' in str(v) for v in first_row):
+		# promote first row to header
+		df.columns = df.iloc[0].astype(str).tolist()
+		df = df[1:]
+	# Standard column names
+	cols_upper = [str(c).upper() for c in df.columns]
+	id_col = None
+	name_col = None
+	for i,c in enumerate(cols_upper):
+		if 'IDENTIDAD' in c or 'IDENTI' in c:
+			id_col = df.columns[i]
+		if 'NOMBRE' in c or 'ALUMNO' in c:
+			name_col = df.columns[i]
+	# If not found, try to guess by position
+	if id_col is None and df.shape[1] >= 2:
+		id_col = df.columns[1]
+	if name_col is None and df.shape[1] >= 3:
+		name_col = df.columns[2]
+
+	# Keep identity and name, and attempt to numeric-cast all other columns that look like scores
+	score_cols = [c for c in df.columns if c not in (id_col, name_col)]
+	for c in score_cols:
+		# remove non-printable and whitespace
+		try:
+			df[c] = df[c].astype(str).str.strip().replace({'N/A':'', 'NA':'', 'nan':''})
+			df[c+'_num'] = pd.to_numeric(df[c], errors='coerce')
+		except Exception:
+			df[c+'_num'] = pd.to_numeric(df[c], errors='coerce')
+
+	# Build a simplified dataframe
+	out_cols = {}
+	if id_col:
+		out_cols['identidad'] = df[id_col].astype(str)
+	if name_col:
+		out_cols['nombre'] = df[name_col].astype(str)
+	# collect numeric columns
+	numeric_cols = [c for c in df.columns if c.endswith('_num')]
+	for c in numeric_cols:
+		out_cols[c[:-4]] = df[c]
+
+	out = pd.DataFrame(out_cols)
+	# compute promedio general por estudiante (ignorar NaNs)
+	score_names = [c for c in out.columns if c not in ('identidad','nombre')]
+	if score_names:
+		out['promedio_general'] = out[score_names].mean(axis=1, skipna=True)
+		# pass/fail flag (consider passing >= 60)
+		out['aprobado_general'] = out['promedio_general'].apply(lambda x: True if pd.notna(x) and x >= 60 else False)
+
+	return out
+
+
 def parse_text_table(text: str, delimiter: str | None = None, header_row: int = 0) -> pd.DataFrame | None:
 	"""Intentar convertir texto tabular (líneas) en DataFrame.
 
@@ -266,6 +380,31 @@ def get_palette(name: str, n: int):
 	if name == 'Pastel':
 		return px.colors.qualitative.Pastel[:n]
 	return px.colors.qualitative.Plotly[:n]
+
+
+def safe_rerun():
+	"""Try to rerun the Streamlit script in a way compatible with multiple Streamlit versions.
+
+	Prefer `st.experimental_rerun()` when available; otherwise fall back to a JS reload via components.
+	"""
+	try:
+		# Some Streamlit versions removed/renamed `experimental_rerun`.
+		rerun = getattr(st, 'experimental_rerun', None)
+		if callable(rerun):
+			rerun()
+			return
+	except Exception:
+		pass
+	try:
+		import streamlit.components.v1 as components
+		components.html("<script>window.location.reload();</script>", height=0)
+	except Exception:
+		# Last resort: navigate to same URL via JS (works similarly)
+		try:
+			import streamlit.components.v1 as components
+			components.html("<script>window.location.href = window.location.href;</script>", height=0)
+		except Exception:
+			pass
 
 
 def main():
@@ -332,6 +471,8 @@ def main():
 						else:
 							st.write('Preview de tabla parseada:')
 							st.dataframe(parsed.head(50))
+							# ensure Arrow compatibility
+							st.dataframe(_coerce_arrow_compatible(parsed.head(50)))
 							if st.button('Usar esta tabla para el análisis'):
 								df = parsed.copy()
 								st.success(f'Tabla parseada cargada (filas: {len(df)})')
@@ -351,10 +492,158 @@ def main():
 			st.error(f'No se pudo leer el archivo de ejemplo: {e}')
 
 	if df is None:
-		st.info('Carga un archivo CSV/XLSX o activa el ejemplo para ver la demo.')
-		return
+		# Inicializar estado de navegación si no existe
+		if 'analysis_page' not in st.session_state:
+			st.session_state['analysis_page'] = None
+
+		# Mostrar una caja informativa (modal-like) usando HTML/CSS — compatible con versiones antiguas de Streamlit
+		with st.container():
+			modal_html = '''
+			<div style="border-radius:8px; padding:18px; background:#ffffff; box-shadow:0 6px 20px rgba(0,0,0,0.08);">
+			  <h3 style="margin-top:0;">Descripción del sistema</h3>
+			  <p>Este sistema analiza datos administrativos de matrícula y datos académicos de calificaciones. Puede leer archivos CSV, Excel y PDF (cuando contienen tablas o texto estructurado) tanto para registros de matrícula como para reportes de calificaciones.</p>
+			  <p>Con los datos de matrícula se realizan análisis demográficos y de distribución por periodo, carrera, grado, sección, género y zonas. Con los datos de calificaciones se calculan métricas académicas (promedios por estudiante y asignatura, tasas de aprobación, percentiles, distribuciones y tendencias por periodo).</p>
+			  <p>El sistema permite combinar ambos conjuntos (matrícula + calificaciones) usando claves de identificación, aplicar filtros interactivos y descargar los resultados en CSV, Excel, PDF o Word cuando las dependencias estén disponibles.</p>
+			  <ul>
+			    <li><strong>Entradas soportadas:</strong> CSV, XLSX, PDF</li>
+			    <li><strong>Salidas:</strong> visualizaciones interactivas, KPIs y descargas (CSV/Excel/PDF/Word)</li>
+			    <li><strong>Nota:</strong> Para exportar a PDF/Word, asegúrate de que las dependencias <code>reportlab</code> y <code>python-docx</code> estén instaladas en el entorno.</li>
+			  </ul>
+			</div>
+			'''
+			st.markdown(modal_html, unsafe_allow_html=True)
+
+		# Debajo del modal mostrar dos botones para elegir el flujo
+		b1, b2, _ = st.columns([1,1,2])
+		with b1:
+			if st.button('Analizar datos de matrícula'):
+				st.session_state['analysis_page'] = 'matricula'
+				safe_rerun()
+		with b2:
+			if st.button('Analizar datos de calificaciones'):
+				st.session_state['analysis_page'] = 'calificaciones'
+				safe_rerun()
+
+		# Si el usuario no ha seleccionado un flujo, detenemos la ejecución para mostrar solo el modal
+		if not st.session_state['analysis_page']:
+			return
+
+		# Si seleccionó calificaciones, mostramos placeholder y no continuamos con matricula
+		if st.session_state['analysis_page'] == 'calificaciones':
+			st.info('Has seleccionado analizar datos de calificaciones. Sube el archivo de calificaciones en la barra lateral.')
+			st.markdown('---')
+			st.subheader('Análisis de calificaciones')
+			# Intentar leer el archivo de calificaciones desde la barra lateral (permitir usar el mismo uploaded_file)
+			cal_file = st.sidebar.file_uploader('Subir archivo de calificaciones (CSV/Excel/PDF)', type=['csv','xls','xlsx','pdf'], key='cal_file')
+			cal_df = None
+			if cal_file is not None:
+				fname = cal_file.name.lower()
+				if fname.endswith('.csv'):
+					cal_df = read_calificaciones_flexible(cal_file)
+				elif fname.endswith(('.xls', '.xlsx')):
+					try:
+						cal_df = pd.read_excel(cal_file)
+					except Exception:
+						cal_df = None
+				elif fname.endswith('.pdf'):
+					try:
+						cal_bytes = cal_file.read()
+						tables = extract_tables_from_pdf(BytesIO(cal_bytes))
+						if tables:
+							cal_df = tables[0]
+						else:
+							text = extract_text_from_pdf(BytesIO(cal_bytes))
+							parsed = parse_text_table(text)
+							cal_df = parsed
+					except Exception:
+						cal_df = None
+			# Si no se subió archivo intentar usar el attachment de ejemplo (si existe)
+			if cal_df is None and 'calificaciones.csv' in globals():
+				try:
+					cal_df = read_calificaciones_flexible('calificaciones.csv')
+				except Exception:
+					cal_df = None
+
+			if cal_df is None:
+				st.warning('No se ha cargado un archivo de calificaciones válido. Sube un CSV/XLSX/PDF con la estructura esperada.')
+				return
+
+			# Clean and process calificaciones
+			cal_clean = clean_calificaciones(cal_df)
+			if cal_clean is None or cal_clean.empty:
+				st.warning('No se pudieron extraer datos válidos de calificaciones.')
+				return
+
+			# KPIs
+			st.markdown('**KPIs de calificaciones**')
+			col1, col2, col3 = st.columns(3)
+			with col1:
+				st.metric('Estudiantes', len(cal_clean))
+			with col2:
+				avg_prom = cal_clean['promedio_general'].dropna().mean() if 'promedio_general' in cal_clean.columns else None
+				st.metric('Promedio general (media)', f"{avg_prom:.1f}" if avg_prom is not None else 'N/A')
+			with col3:
+				pass_rate = cal_clean['aprobado_general'].mean()*100 if 'aprobado_general' in cal_clean.columns else None
+				st.metric('Tasa aprobación general', f"{pass_rate:.1f}%" if pass_rate is not None else 'N/A')
+
+			# Mostrar tabla de preview
+			with st.expander('Datos de calificaciones (vista previa)', expanded=False):
+				st.dataframe(_coerce_arrow_compatible(cal_clean.head(200)))
+
+			# Gráfica 1: Promedios por materia (boxplots si hay columnas de materia)
+			score_cols = [c for c in cal_clean.columns if c not in ('identidad','nombre','promedio_general','aprobado_general')]
+			if score_cols:
+				st.subheader('Distribución de notas por asignatura')
+				# preparar dataframe en formato largo
+				long = cal_clean.melt(id_vars=['identidad','nombre'], value_vars=score_cols, var_name='materia', value_name='nota')
+				long = long.dropna(subset=['nota'])
+				fig = px.box(long, x='materia', y='nota', title='Boxplot de notas por materia')
+				st.plotly_chart(fig, use_container_width=True)
+
+				# Gráfica 2: Tasa de reprobación por materia
+				st.subheader('Tasa de reprobación por materia')
+				reprob = long.copy()
+				reprob['reprobo'] = reprob['nota'] < 60
+				rate = reprob.groupby('materia')['reprobo'].mean().reset_index(name='tasa_reprob')
+				rate = rate.sort_values('tasa_reprob', ascending=False)
+				fig2 = px.bar(rate, x='materia', y='tasa_reprob', title='Tasa de reprobación por materia', labels={'tasa_reprob':'Tasa (0-1)'})
+				st.plotly_chart(fig2, use_container_width=True)
+
+			# Export de resultados agregados
+			agg_buf = BytesIO()
+			try:
+				with pd.ExcelWriter(agg_buf, engine='xlsxwriter') as writer:
+					rate.to_excel(writer, index=False, sheet_name='TasaReprob')
+			except Exception:
+				pass
+			st.download_button('Descargar tasa de reprobación (CSV)', data=rate.to_csv(index=False).encode('utf-8'), file_name='tasa_reprobacion.csv', mime='text/csv')
+
+			return
 
 	df = clean_matricula(df)
+
+	# Ancla para KPIs/Gráficas — permite navegar directamente a esta sección
+	st.markdown("<div id='kpis'></div>", unsafe_allow_html=True)
+
+	# Si el usuario pidió ir al flujo 'matricula', hacemos scroll automático a la ancla
+	try:
+		if st.session_state.get('analysis_page') == 'matricula':
+			# pequeño script que hace scroll al elemento con id 'kpis'
+			scroll_js = """
+			<script>
+			setTimeout(function(){
+			  var el = document.getElementById('kpis');
+			  if(el){ el.scrollIntoView({behavior:'smooth', block:'start'}); }
+			}, 200);
+			</script>
+			"""
+			import streamlit.components.v1 as components
+			components.html(scroll_js, height=0)
+			# Limpiar la señal para que no vuelva a hacer scroll en cada recarga
+			st.session_state['analysis_page'] = None
+	except Exception:
+		# Si algo falla aquí no interrumpimos el flujo normal
+		pass
 	# --- KPIs ---
 	st.markdown('')
 	try:
@@ -381,7 +670,7 @@ def main():
 	col_kpi4.metric('% Femenino (aprox.)', f"{pct_female:.1f}%" if pct_female is not None else 'N/A')
 
 	with st.expander('Datos (vistazo)', expanded=False):
-		st.dataframe(df.head(200))
+		st.dataframe(_coerce_arrow_compatible(df.head(200)))
 
 	# Allow download of cleaned data
 	csv_bytes = to_csv_bytes(df)
@@ -546,18 +835,13 @@ def main():
 		# opciones de agrupación
 		group_opts = ['Ninguno'] + [c for c in ['carrera', 'grado', 'seccion', 'jornada', 'genero'] if c in filtered.columns]
 		group_by = st.selectbox('Agrupar por', options=group_opts, index=0)
-		show_pct_change = st.checkbox('Mostrar cambio año-a-año (%)', value=True)
 		show_cumulative = st.checkbox('Mostrar acumulado', value=False)
 		# calcular conteos
 		if group_by == 'Ninguno':
 			counts = filtered.groupby('periodo_escolar_clean').size().reset_index(name='count').sort_values('periodo_escolar_clean')
 			fig_ev = px.line(counts, x='periodo_escolar_clean', y='count', title='Evolución de la matrícula (total)')
 			st.plotly_chart(fig_ev, use_container_width=True)
-			if show_pct_change:
-				counts = counts.sort_values('periodo_escolar_clean')
-				counts['pct_change'] = counts['count'].pct_change().fillna(0) * 100
-				fig_pc = px.bar(counts, x='periodo_escolar_clean', y='pct_change', title='Cambio porcentual año-a-año (%)')
-				st.plotly_chart(fig_pc, use_container_width=True)
+			# La gráfica de cambio porcentual año-a-año fue removida por petición.
 			if show_cumulative:
 				counts['cumulative'] = counts['count'].cumsum()
 				fig_cum = px.line(counts, x='periodo_escolar_clean', y='cumulative', title='Evolución acumulada de la matrícula')
@@ -568,13 +852,6 @@ def main():
 			grp = grp.sort_values('periodo_escolar_clean')
 			fig_ev2 = px.line(grp, x='periodo_escolar_clean', y='count', color=group_by, title=f'Evolución por {group_by}')
 			st.plotly_chart(fig_ev2, use_container_width=True)
-			if show_pct_change:
-				# calcular pct change por grupo
-				pct_df = grp.copy()
-				pct_df = pct_df.sort_values([group_by, 'periodo_escolar_clean'])
-				pct_df['pct_change'] = pct_df.groupby(group_by)['count'].pct_change().fillna(0) * 100
-				fig_pct = px.bar(pct_df, x='periodo_escolar_clean', y='pct_change', color=group_by, title='Cambio porcentual año-a-año por grupo')
-				st.plotly_chart(fig_pct, use_container_width=True)
 			if show_cumulative:
 				cum_df = grp.copy()
 				cum_df['cumulative'] = cum_df.groupby(group_by)['count'].cumsum()
@@ -631,7 +908,7 @@ def main():
 		grp['pct_finished'] = (grp['finished'] / grp['started']).replace([np.inf, -np.inf], np.nan).fillna(0) * 100
 		grp['pct_not_finished'] = (grp['not_finished'] / grp['started']).replace([np.inf, -np.inf], np.nan).fillna(0) * 100
 		st.write('Tabla resumen por periodo:')
-		st.dataframe(grp)
+		st.dataframe(_coerce_arrow_compatible(grp))
 		# Graficas: lineas de started vs finished
 		if 'periodo_escolar_clean' in grp.columns:
 			fig_sf = go.Figure()
@@ -648,16 +925,21 @@ def main():
 		top_n_ab = st.number_input('Top N periodos por tasa de abandono', min_value=1, max_value=50, value=5)
 		top_ab = grp.sort_values('pct_not_finished', ascending=False).head(int(top_n_ab))
 		st.subheader('Periodos con mayor tasa de abandono')
-		st.dataframe(top_ab)
+		st.dataframe(_coerce_arrow_compatible(top_ab))
 
 	# --- Grado y Sección: cantidad de estudiantes ---
 	with st.expander('Cantidad de estudiantes por grado y sección', expanded=False):
 		st.write('Visualizaciones y resumen por grado y sección')
-	# Opciones de visualización
-	chart_choice = st.selectbox('Tipo de visualización', options=['Barra por grado', 'Barra por sección', 'Heatmap Grado x Sección', 'Barras apiladas (grado->sección)'], index=0)
-	palette = st.selectbox('Paleta de colores', options=['Plotly', 'Viridis', 'Cividis', 'Inferno', 'Blues', 'Pastel'], index=0)
-	top_n = st.number_input('Top N elementos para mostrar (0 = todos)', min_value=0, max_value=50, value=0)
-	show_pct_gs = st.checkbox('Mostrar porcentajes en barras', value=False)
+	# Opciones de visualización (controles compactos en columnas)
+	col_a, col_b, col_c, col_d = st.columns([2,2,1,1])
+	with col_a:
+		chart_choice = st.selectbox('Tipo de visualización', options=['Barra por grado', 'Barra por sección', 'Heatmap Grado x Sección', 'Barras apiladas (grado->sección)'], index=0)
+	with col_b:
+		palette = st.selectbox('Paleta de colores', options=['Plotly', 'Viridis', 'Cividis', 'Inferno', 'Blues', 'Pastel'], index=0)
+	with col_c:
+		top_n = st.number_input('Top N elementos (0=todos)', min_value=0, max_value=50, value=0)
+	with col_d:
+		show_pct_gs = st.checkbox('Mostrar porcentajes', value=False)
 
 	# Usar la función `get_palette` definida a nivel de módulo
 
@@ -722,84 +1004,280 @@ def main():
 	else:
 		st.info('No hay columnas `grado` y `seccion` suficientes para este análisis.')
 
-	# --- Distribución por carrera ---
+	# --- Distribución por carrera (siempre visible) ---
 	st.markdown('---')
-	with st.expander('Distribución por carrera', expanded=False):
-		if 'carrera' in filtered.columns:
+	if 'carrera' in filtered.columns:
+		# Compact controls: put the 3 selectors side-by-side in narrower columns
+		ccol1, ccol2, ccol3 = st.columns([2,1,1])
+		with ccol1:
 			c_chart_type = st.selectbox('Tipo de gráfico (carrera)', options=['Barras', 'Pastel', 'Barras apiladas por género', 'Barras apiladas por jornada'], index=0)
+		with ccol2:
 			c_palette = st.selectbox('Paleta (carrera)', options=['Plotly','Viridis','Cividis','Pastel','Blues'], index=0)
-			top_n_c = st.number_input('Top N carreras (0 = todos)', min_value=0, max_value=100, value=0)
+		with ccol3:
+			top_n_c = st.number_input('Top N (0=todos)', min_value=0, max_value=100, value=0)
 
-			c_counts = filtered['carrera'].value_counts().reset_index()
-			c_counts.columns = ['carrera', 'count']
-			if top_n_c and top_n_c > 0:
-				c_counts = c_counts.head(top_n_c)
+		c_counts = filtered['carrera'].value_counts().reset_index()
+		c_counts.columns = ['carrera', 'count']
+		if top_n_c and top_n_c > 0:
+			c_counts = c_counts.head(top_n_c)
 
-			pal_c = get_palette(c_palette, max(len(c_counts), 3))
+		pal_c = get_palette(c_palette, max(len(c_counts), 3))
 
-			if c_chart_type == 'Barras':
-				figc = px.bar(c_counts, x='carrera', y='count', title='Cantidad por carrera', color='carrera', color_discrete_sequence=pal_c)
-				st.plotly_chart(figc, use_container_width=True)
-			elif c_chart_type == 'Pastel':
-				figc = go.Figure(data=[go.Pie(labels=c_counts['carrera'], values=c_counts['count'], textinfo='label+percent')])
-				figc.update_layout(title='Distribución por carrera')
-				st.plotly_chart(figc, use_container_width=True)
-			elif c_chart_type == 'Barras apiladas por género' and 'genero' in filtered.columns:
-				cross = filtered.groupby(['carrera','genero']).size().reset_index(name='count')
-				pivot = cross.pivot(index='carrera', columns='genero', values='count').fillna(0)
-				figc = go.Figure()
-				colors = get_palette(c_palette, len(pivot.columns))
-				for i, col in enumerate(pivot.columns):
-					figc.add_trace(go.Bar(x=pivot.index, y=pivot[col], name=str(col), marker_color=colors[i % len(colors)]))
-				figc.update_layout(barmode='stack', title='Carrera x Género', xaxis_title='Carrera')
-				st.plotly_chart(figc, use_container_width=True)
-			elif c_chart_type == 'Barras apiladas por jornada' and 'jornada' in filtered.columns:
-				cross = filtered.groupby(['carrera','jornada']).size().reset_index(name='count')
-				pivot = cross.pivot(index='carrera', columns='jornada', values='count').fillna(0)
-				figc = go.Figure()
-				colors = get_palette(c_palette, len(pivot.columns))
-				for i, col in enumerate(pivot.columns):
-					figc.add_trace(go.Bar(x=pivot.index, y=pivot[col], name=str(col), marker_color=colors[i % len(colors)]))
-				figc.update_layout(barmode='stack', title='Carrera x Jornada', xaxis_title='Carrera')
-				st.plotly_chart(figc, use_container_width=True)
-		else:
-			st.info('No hay columna `carrera` en el dataset filtrado.')
+		if c_chart_type == 'Barras':
+			figc = px.bar(c_counts, x='carrera', y='count', title='Cantidad por carrera', color='carrera', color_discrete_sequence=pal_c)
+			st.plotly_chart(figc, use_container_width=True)
+		elif c_chart_type == 'Pastel':
+			figc = go.Figure(data=[go.Pie(labels=c_counts['carrera'], values=c_counts['count'], textinfo='label+percent')])
+			figc.update_layout(title='Distribución por carrera')
+			st.plotly_chart(figc, use_container_width=True)
+		elif c_chart_type == 'Barras apiladas por género' and 'genero' in filtered.columns:
+			cross = filtered.groupby(['carrera','genero']).size().reset_index(name='count')
+			pivot = cross.pivot(index='carrera', columns='genero', values='count').fillna(0)
+			figc = go.Figure()
+			colors = get_palette(c_palette, len(pivot.columns))
+			for i, col in enumerate(pivot.columns):
+				figc.add_trace(go.Bar(x=pivot.index, y=pivot[col], name=str(col), marker_color=colors[i % len(colors)]))
+			figc.update_layout(barmode='stack', title='Carrera x Género', xaxis_title='Carrera')
+			st.plotly_chart(figc, use_container_width=True)
+		elif c_chart_type == 'Barras apiladas por jornada' and 'jornada' in filtered.columns:
+			cross = filtered.groupby(['carrera','jornada']).size().reset_index(name='count')
+			pivot = cross.pivot(index='carrera', columns='jornada', values='count').fillna(0)
+			figc = go.Figure()
+			colors = get_palette(c_palette, len(pivot.columns))
+			for i, col in enumerate(pivot.columns):
+				figc.add_trace(go.Bar(x=pivot.index, y=pivot[col], name=str(col), marker_color=colors[i % len(colors)]))
+			figc.update_layout(barmode='stack', title='Carrera x Jornada', xaxis_title='Carrera')
+			st.plotly_chart(figc, use_container_width=True)
+	else:
+		st.info('No hay columna `carrera` en el dataset filtrado.')
 
-	# --- Distribución por zona/colonia ---
+	# --- Distribución por zona/colonia (siempre visible) ---
 	st.markdown('---')
 	# Trabajar sobre copia fuera del expander para evitar reasignaciones problemáticas
 	filtered_for_zona = filtered.copy()
-	with st.expander('Distribución por zona / colonia', expanded=False):
-		# detectar columnas candidatas (usar lower para mayor robustez)
-		z_col_candidates = [c for c in filtered_for_zona.columns if 'zona' in c.lower() or 'colonia' in c.lower() or 'sector' in c.lower()]
-		# asegurar variable inicializada para evitar UnboundLocalError
-		if not isinstance(z_col_candidates, list):
-			z_col_candidates = []
-		if z_col_candidates:
-			zcol = st.selectbox('Columna de zona', options=z_col_candidates, index=0)
-			z_counts = filtered_for_zona[zcol].value_counts().reset_index()
-			z_counts.columns = [zcol, 'count']
+	# detectar columnas candidatas (usar lower para mayor robustez)
+	z_col_candidates = [c for c in filtered_for_zona.columns if 'zona' in c.lower() or 'colonia' in c.lower() or 'sector' in c.lower()]
+	if z_col_candidates:
+		# Compact controls: Tipo de gráfica, Paleta, Top N (lado a lado)
+		zcol1, zcol2, zcol3 = st.columns([2,1,1])
+		with zcol1:
+			z_chart_type = st.selectbox('Tipo de gráfica (zona)', options=['Barras','Pastel','Mapa (si lat/lon)'], index=0)
+		with zcol2:
+			z_palette = st.selectbox('Paleta (zona)', options=['Plotly','Viridis','Cividis','Pastel','Blues'], index=0)
+		with zcol3:
 			top_z = st.number_input('Top N zonas (0 = todos)', min_value=0, max_value=100, value=10)
-			if top_z and top_z > 0:
-				z_counts = z_counts.head(top_z)
-			pal_z = get_palette('Plotly', max(len(z_counts), 3))
+
+		# elegir la primera columna candidata para la visualización (si hay más de una)
+		zcol = z_col_candidates[0]
+		z_counts = filtered_for_zona[zcol].value_counts().reset_index()
+		z_counts.columns = [zcol, 'count']
+		if top_z and top_z > 0:
+			z_counts = z_counts.head(top_z)
+		pal_z = get_palette(z_palette, max(len(z_counts), 3))
+
+		if z_chart_type == 'Barras':
+			figz = px.bar(z_counts, x=zcol, y='count', title=f'Cantidad por {zcol}', color=zcol, color_discrete_sequence=pal_z)
+			st.plotly_chart(figz, use_container_width=True)
+		elif z_chart_type == 'Pastel':
+			figz = px.pie(z_counts, names=zcol, values='count', title=f'Distribución por {zcol}', color_discrete_sequence=pal_z)
+			st.plotly_chart(figz, use_container_width=True)
+		else:
+			# For map, show message (actual map requires lat/lon columns)
+			st.info('Si tu dataset contiene columnas de latitud/longitud, se puede mostrar un mapa interactivo. Actualmente se muestra la tabla de conteos.')
 			figz = px.bar(z_counts, x=zcol, y='count', title=f'Cantidad por {zcol}', color=zcol, color_discrete_sequence=pal_z)
 			st.plotly_chart(figz, use_container_width=True)
 
-			# Mapa si existen lat/lon
-			lat_cols = [c for c in filtered_for_zona.columns if 'lat' in c.lower()]
-			lon_cols = [c for c in filtered_for_zona.columns if 'lon' in c.lower() or 'long' in c.lower()]
-			if lat_cols and lon_cols:
-				latc = lat_cols[0]
-				lonc = lon_cols[0]
-				map_df = filtered_for_zona.dropna(subset=[latc, lonc])
-				if not map_df.empty:
-					st.subheader('Mapa de procedencia (lat/lon)')
-					figmap = px.scatter_mapbox(map_df, lat=latc, lon=lonc, hover_name=zcol, color=zcol, size_max=10, zoom=10)
-					figmap.update_layout(mapbox_style='open-street-map')
-					st.plotly_chart(figmap, use_container_width=True)
-		else:
-			st.info('No se detectó una columna de zona/colonia en el dataset.')
+		# Mapa si existen lat/lon
+		lat_cols = [c for c in filtered_for_zona.columns if 'lat' in c.lower()]
+		lon_cols = [c for c in filtered_for_zona.columns if 'lon' in c.lower() or 'long' in c.lower()]
+		if lat_cols and lon_cols:
+			latc = lat_cols[0]
+			lonc = lon_cols[0]
+			map_df = filtered_for_zona.dropna(subset=[latc, lonc])
+			if not map_df.empty:
+				st.subheader('Mapa de procedencia (lat/lon)')
+				figmap = px.scatter_mapbox(map_df, lat=latc, lon=lonc, hover_name=zcol, color=zcol, size_max=10, zoom=10)
+				figmap.update_layout(mapbox_style='open-street-map')
+				st.plotly_chart(figmap, use_container_width=True)
+	else:
+		st.info('No se detectó una columna de zona/colonia en el dataset.')
+
+	# --- Resumen textual final (tabla resumen) ---
+	st.markdown('---')
+	# st.subheader('Resumen textual de resultados')
+	# Build a concise textual summary from `filtered`
+	try:
+		total = len(filtered)
+		periods = sorted(filtered['periodo_escolar_clean'].dropna().unique().tolist()) if 'periodo_escolar_clean' in filtered.columns else []
+		period_range = f"{min(periods)} - {max(periods)}" if periods else 'N/A'
+		# top carreras
+		top_carr = filtered['carrera'].value_counts().head(5)
+		# genero distribution
+		gender_pct = None
+		if 'genero' in filtered.columns:
+			vc = filtered['genero'].value_counts(normalize=True)
+			gender_pct = {str(k): f"{v*100:.1f}%" for k, v in vc.items()}
+		# edad stats
+		age_stat = None
+		if 'edad_numeric' in filtered.columns:
+			age_series = filtered['edad_numeric'].dropna().astype(float)
+			if not age_series.empty:
+				age_stat = {
+					'mean': round(float(age_series.mean()),1),
+					'median': round(float(age_series.median()),1),
+					'min': int(age_series.min()),
+					'max': int(age_series.max())
+				}
+		# top zonas
+		top_z = None
+		zcol = None
+		z_col_candidates = [c for c in filtered.columns if 'zona' in c.lower() or 'colonia' in c.lower() or 'sector' in c.lower()]
+		if z_col_candidates:
+			zcol = z_col_candidates[0]
+			top_z = filtered[zcol].value_counts().head(5)
+
+		# top grados
+		top_g = None
+		if 'grado' in filtered.columns:
+			top_g = filtered['grado'].value_counts().head(5)
+
+		# assemble a DataFrame summary for display
+		summary_rows = []
+		summary_rows.append({'metric':'Total registros','value':total})
+		summary_rows.append({'metric':'Rango periodos','value':period_range})
+		if not top_carr.empty:
+			summary_rows.append({'metric':'Top carreras (top 5)','value':'; '.join([f"{i+1}. {idx} ({val})" for i,(idx,val) in enumerate(top_carr.items())])})
+		if gender_pct:
+			summary_rows.append({'metric':'Distribución por género','value':'; '.join([f"{k}: {v}" for k,v in gender_pct.items()])})
+		if age_stat:
+			summary_rows.append({'metric':'Edad (media/mediana/min-max)','value':f"{age_stat['mean']}/{age_stat['median']}/{age_stat['min']}-{age_stat['max']}"})
+		if top_z is not None and not top_z.empty:
+			summary_rows.append({'metric':f'Top zonas (columna: {zcol})','value':'; '.join([f"{i+1}. {idx} ({val})" for i,(idx,val) in enumerate(top_z.items())])})
+		if top_g is not None and not top_g.empty:
+			summary_rows.append({'metric':'Top grados (top 5)','value':'; '.join([f"{i+1}. {idx} ({val})" for i,(idx,val) in enumerate(top_g.items())])})
+
+		summary_df = pd.DataFrame(summary_rows)
+		# Header and download selector side-by-side
+		head_col, dl_col = st.columns([4,1])
+		with head_col:
+			st.subheader('Resumen textual de resultados')
+
+		# show table under header
+		st.table(summary_df)
+
+		# detect capabilities
+		try:
+			import docx
+			can_word = True
+		except Exception:
+			can_word = False
+		can_pdf = False
+		try:
+			import reportlab
+			can_pdf = True
+		except Exception:
+			try:
+				import fpdf
+				can_pdf = True
+			except Exception:
+				can_pdf = False
+
+		# build options
+		download_options = ['CSV', 'Excel']
+		if can_pdf:
+			download_options.append('PDF')
+		if can_word:
+			download_options.append('Word')
+
+		with dl_col:
+			sel = st.selectbox('Descargar', options=download_options, index=0)
+			# prepare bytes and metadata based on selection
+			file_bytes = None
+			filename = 'resumen_matricula'
+			mime = 'application/octet-stream'
+			if sel == 'CSV':
+				file_bytes = summary_df.to_csv(index=False).encode('utf-8')
+				filename += '.csv'
+				mime = 'text/csv'
+			elif sel == 'Excel':
+				buf = BytesIO()
+				wrote = False
+				for engine in ('openpyxl','xlsxwriter'):
+					try:
+						with pd.ExcelWriter(buf, engine=engine) as writer:
+							summary_df.to_excel(writer, index=False, sheet_name='Resumen')
+							wrote = True
+							break
+					except Exception:
+						buf.seek(0)
+						buf.truncate(0)
+				if not wrote:
+					with pd.ExcelWriter(buf) as writer:
+						summary_df.to_excel(writer, index=False, sheet_name='Resumen')
+				file_bytes = buf.getvalue()
+				filename += '.xlsx'
+				mime = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+			elif sel == 'Word' and can_word:
+				from docx import Document
+				doc = Document()
+				doc.add_heading('Resumen textual de resultados', level=2)
+				for r in summary_rows:
+					doc.add_paragraph(f"{r['metric']}: {r['value']}")
+				buf = BytesIO()
+				doc.save(buf)
+				file_bytes = buf.getvalue()
+				filename += '.docx'
+				mime = 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
+			elif sel == 'PDF' and can_pdf:
+				buf = BytesIO()
+				# prefer reportlab
+				try:
+					from reportlab.lib.pagesizes import letter
+					from reportlab.pdfgen import canvas
+					import textwrap
+					c = canvas.Canvas(buf, pagesize=letter)
+					y = 750
+					c.setFont('Helvetica', 12)
+					c.drawString(50, y, 'Resumen textual de resultados')
+					y -= 24
+					for r in summary_rows:
+						lines = textwrap.wrap(f"{r['metric']}: {r['value']}", 90)
+						for line in lines:
+							if y < 50:
+								c.showPage()
+								y = 750
+								c.setFont('Helvetica', 12)
+							c.drawString(50, y, line)
+							y -= 14
+					c.save()
+				except Exception:
+					from fpdf import FPDF
+					pdf = FPDF()
+					pdf.add_page()
+					pdf.set_font('Arial', size=12)
+					pdf.cell(0, 10, 'Resumen textual de resultados', ln=1)
+					for r in summary_rows:
+						pdf.multi_cell(0, 8, f"{r['metric']}: {r['value']}")
+					pdf.output(buf)
+				file_bytes = buf.getvalue()
+				filename += '.pdf'
+				mime = 'application/pdf'
+
+			# display download button
+			if file_bytes is not None:
+				st.download_button('Descargar', data=file_bytes, file_name=filename, mime=mime)
+
+		# Printable HTML view (below the table)
+		with st.expander('Vista imprimible', expanded=False):
+			html = '<html><head><meta charset="utf-8"><title>Resumen textual</title></head><body>'
+			html += f"<h2>Resumen textual de resultados</h2><p>Total registros: {total}</p><p>Rango periodos: {period_range}</p>"
+			for row in summary_rows:
+				html += f"<p><strong>{row['metric']}</strong>: {row['value']}</p>"
+			html += '<p><button onclick="window.print()">Imprimir</button></p>'
+			html += '</body></html>'
+			st.components.v1.html(html, height=300)
+	except Exception as e:
+		st.error(f'No se pudo generar el resumen textual: {e}')
 
 
 if __name__ == '__main__':

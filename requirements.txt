@@ -7,3 +7,6 @@ seaborn
 matplotlib
 pdfplumber
 openpyxl
+reportlab
+python-docx
+XlsxWriter
