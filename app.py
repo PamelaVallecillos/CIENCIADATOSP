@@ -562,54 +562,150 @@ def main():
 				return
 
 			# Clean and process calificaciones
-			cal_clean = clean_calificaciones(cal_df)
-			if cal_clean is None or cal_clean.empty:
-				st.warning('No se pudieron extraer datos válidos de calificaciones.')
-				return
+			cal_clean = cal_df.copy()
+			# Normalizar nombres de columnas
+			cal_clean.columns = [str(c).strip().replace(' ', '_').replace('__','_').lower() for c in cal_clean.columns]
 
-			# KPIs
+			# Identificar columnas de materias (terminan en '_promedio')
+			materia_cols = [c for c in cal_clean.columns if c.endswith('_promedio') and c not in ('promedio_general',)]
+
+			# Convertir a numérico las columnas de notas
+			for c in materia_cols + ['promedio_general']:
+				if c in cal_clean.columns:
+					cal_clean[c] = pd.to_numeric(cal_clean[c], errors='coerce')
+
+			# KPIs principales
 			st.markdown('**KPIs de calificaciones**')
-			col1, col2, col3 = st.columns(3)
+			col1, col2, col3, col4 = st.columns(4)
 			with col1:
 				st.metric('Estudiantes', len(cal_clean))
 			with col2:
 				avg_prom = cal_clean['promedio_general'].dropna().mean() if 'promedio_general' in cal_clean.columns else None
-				st.metric('Promedio general (media)', f"{avg_prom:.1f}" if avg_prom is not None else 'N/A')
+				st.metric('Promedio general', f"{avg_prom:.1f}" if avg_prom is not None else 'N/A')
 			with col3:
-				pass_rate = cal_clean['aprobado_general'].mean()*100 if 'aprobado_general' in cal_clean.columns else None
-				st.metric('Tasa aprobación general', f"{pass_rate:.1f}%" if pass_rate is not None else 'N/A')
+				# Tasa de reprobación general (al menos una materia <60)
+				if materia_cols:
+					cal_clean['reprobo_alguna'] = cal_clean[materia_cols].lt(60).any(axis=1)
+					fail_rate = cal_clean['reprobo_alguna'].mean()*100
+					st.metric('Reprobación (≥1 materia)', f"{fail_rate:.1f}%")
+				else:
+					st.metric('Reprobación (≥1 materia)', 'N/A')
+			with col4:
+				# Sobresalientes por grado (promedio ≥90)
+				if 'promedio_general' in cal_clean.columns and 'grado' in cal_clean.columns:
+					sobresalientes = cal_clean[cal_clean['promedio_general']>=90].groupby('grado').size()
+					st.metric('Sobresalientes (≥90)', sobresalientes.sum())
+				else:
+					st.metric('Sobresalientes (≥90)', 'N/A')
 
-			# Mostrar tabla de preview
+			# Vista previa
 			with st.expander('Datos de calificaciones (vista previa)', expanded=False):
 				st.dataframe(_coerce_arrow_compatible(cal_clean.head(200)))
 
-			# Gráfica 1: Promedios por materia (boxplots si hay columnas de materia)
-			score_cols = [c for c in cal_clean.columns if c not in ('identidad','nombre','promedio_general','aprobado_general')]
-			if score_cols:
-				st.subheader('Distribución de notas por asignatura')
-				# preparar dataframe en formato largo
-				long = cal_clean.melt(id_vars=['identidad','nombre'], value_vars=score_cols, var_name='materia', value_name='nota')
-				long = long.dropna(subset=['nota'])
-				fig = px.box(long, x='materia', y='nota', title='Boxplot de notas por materia')
-				st.plotly_chart(fig, use_container_width=True)
+			# 1. Materias con mayor índice de reprobación
+			if materia_cols:
+				st.subheader('Materias con mayor índice de reprobación (<60)')
+				col_tipo, col_pal = st.columns([1,1])
+				with col_tipo:
+					tipo_graf1 = st.selectbox('Tipo de gráfica', ['Barras', 'Pastel'], key='tipo_reprob')
+				with col_pal:
+					paleta1 = st.selectbox('Paleta de colores', ['Plotly','Viridis','Cividis','Inferno','Blues','Pastel'], key='paleta_reprob')
+				reprob_materia = (cal_clean[materia_cols] < 60).mean().sort_values(ascending=False).reset_index()
+				reprob_materia.columns = ['materia','tasa_reprobacion']
+				pal_colors1 = get_palette(paleta1, max(3, reprob_materia.shape[0]))
+				if tipo_graf1 == 'Barras':
+					fig1 = px.bar(reprob_materia, x='materia', y='tasa_reprobacion', title='Índice de reprobación por materia', labels={'tasa_reprobacion':'Tasa (0-1)'}, color='materia', color_discrete_sequence=pal_colors1)
+					st.plotly_chart(fig1, use_container_width=True)
+				else:
+					fig1 = px.pie(reprob_materia, names='materia', values='tasa_reprobacion', title='Índice de reprobación por materia', color_discrete_sequence=pal_colors1)
+					st.plotly_chart(fig1, use_container_width=True)
 
-				# Gráfica 2: Tasa de reprobación por materia
-				st.subheader('Tasa de reprobación por materia')
-				reprob = long.copy()
-				reprob['reprobo'] = reprob['nota'] < 60
-				rate = reprob.groupby('materia')['reprobo'].mean().reset_index(name='tasa_reprob')
-				rate = rate.sort_values('tasa_reprob', ascending=False)
-				fig2 = px.bar(rate, x='materia', y='tasa_reprob', title='Tasa de reprobación por materia', labels={'tasa_reprob':'Tasa (0-1)'})
-				st.plotly_chart(fig2, use_container_width=True)
+			# 2. Promedio general de notas por grado, sección y materia (gráficas)
+			st.subheader('Promedio general de notas por grado, sección y materia')
+			colg, cols, colm = st.columns(3)
+			# Por grado
+			with colg:
+				col_tipo_g, col_pal_g = st.columns([1,1])
+				tipo_graf_g = col_tipo_g.selectbox('Tipo de gráfica', ['Barras', 'Pastel'], key='tipo_grado')
+				paleta_g = col_pal_g.selectbox('Paleta de colores', ['Plotly','Viridis','Cividis','Inferno','Blues','Pastel'], key='paleta_grado')
+				if 'grado' in cal_clean.columns:
+					prom_grado = cal_clean.groupby('grado')['promedio_general'].mean().reset_index()
+					pal_colors_g = get_palette(paleta_g, max(3, prom_grado.shape[0]))
+					if tipo_graf_g == 'Barras':
+						fig_g = px.bar(prom_grado, x='grado', y='promedio_general', title='Promedio por grado', labels={'promedio_general':'Promedio'}, color='grado', color_discrete_sequence=pal_colors_g)
+						st.plotly_chart(fig_g, use_container_width=True)
+					else:
+						fig_g = px.pie(prom_grado, names='grado', values='promedio_general', title='Promedio por grado', color_discrete_sequence=pal_colors_g)
+						st.plotly_chart(fig_g, use_container_width=True)
+			# Por sección
+			with cols:
+				col_tipo_s, col_pal_s = st.columns([1,1])
+				tipo_graf_s = col_tipo_s.selectbox('Tipo de gráfica', ['Barras', 'Pastel'], key='tipo_seccion')
+				paleta_s = col_pal_s.selectbox('Paleta de colores', ['Plotly','Viridis','Cividis','Inferno','Blues','Pastel'], key='paleta_seccion')
+				if 'seccion' in cal_clean.columns:
+					prom_seccion = cal_clean.groupby('seccion')['promedio_general'].mean().reset_index()
+					pal_colors_s = get_palette(paleta_s, max(3, prom_seccion.shape[0]))
+					if tipo_graf_s == 'Barras':
+						fig_s = px.bar(prom_seccion, x='seccion', y='promedio_general', title='Promedio por sección', labels={'promedio_general':'Promedio'}, color='seccion', color_discrete_sequence=pal_colors_s)
+						st.plotly_chart(fig_s, use_container_width=True)
+					else:
+						fig_s = px.pie(prom_seccion, names='seccion', values='promedio_general', title='Promedio por sección', color_discrete_sequence=pal_colors_s)
+						st.plotly_chart(fig_s, use_container_width=True)
+			# Por materia
+			with colm:
+				col_tipo_m, col_pal_m = st.columns([1,1])
+				tipo_graf_m = col_tipo_m.selectbox('Tipo de gráfica', ['Barras', 'Pastel'], key='tipo_materia')
+				paleta_m = col_pal_m.selectbox('Paleta de colores', ['Plotly','Viridis','Cividis','Inferno','Blues','Pastel'], key='paleta_materia')
+				prom_materia = cal_clean[materia_cols].mean().sort_values(ascending=False).reset_index()
+				prom_materia.columns = ['materia','promedio']
+				pal_colors_m = get_palette(paleta_m, max(3, prom_materia.shape[0]))
+				if tipo_graf_m == 'Barras':
+					fig_m = px.bar(prom_materia, x='materia', y='promedio', title='Promedio por materia', labels={'promedio':'Promedio'}, color='materia', color_discrete_sequence=pal_colors_m)
+					st.plotly_chart(fig_m, use_container_width=True)
+				else:
+					fig_m = px.pie(prom_materia, names='materia', values='promedio', title='Promedio por materia', color_discrete_sequence=pal_colors_m)
+					st.plotly_chart(fig_m, use_container_width=True)
 
-			# Export de resultados agregados
-			agg_buf = BytesIO()
-			try:
-				with pd.ExcelWriter(agg_buf, engine='xlsxwriter') as writer:
-					rate.to_excel(writer, index=False, sheet_name='TasaReprob')
-			except Exception:
-				pass
-			st.download_button('Descargar tasa de reprobación (CSV)', data=rate.to_csv(index=False).encode('utf-8'), file_name='tasa_reprobacion.csv', mime='text/csv')
+			# 3. Materias con promedios más altos y más bajos (gráfica)
+			st.subheader('Materias con promedios más altos y más bajos')
+			col_tipo_tb, col_pal_tb = st.columns([1,1])
+			tipo_graf_tb = col_tipo_tb.selectbox('Tipo de gráfica', ['Barras horizontales', 'Barras verticales'], key='tipo_topbottom')
+			paleta_tb = col_pal_tb.selectbox('Paleta de colores', ['Plotly','Viridis','Cividis','Inferno','Blues','Pastel'], key='paleta_topbottom')
+			# Tomar top 3 y bottom 3
+			top_bottom = pd.concat([prom_materia.head(3), prom_materia.tail(3)]).drop_duplicates()
+			pal_colors_tb = get_palette(paleta_tb, max(3, top_bottom.shape[0]))
+			if tipo_graf_tb == 'Barras horizontales':
+				fig_tb = px.bar(top_bottom, x='promedio', y='materia', orientation='h',
+					title='Materias con promedios más altos y más bajos',
+					labels={'promedio':'Promedio','materia':'Materia'},
+					color='materia', color_discrete_sequence=pal_colors_tb)
+				st.plotly_chart(fig_tb, use_container_width=True)
+			else:
+				fig_tb = px.bar(top_bottom, x='materia', y='promedio', orientation='v',
+					title='Materias con promedios más altos y más bajos',
+					labels={'promedio':'Promedio','materia':'Materia'},
+					color='materia', color_discrete_sequence=pal_colors_tb)
+				st.plotly_chart(fig_tb, use_container_width=True)
+
+			# 4. Cantidad de estudiantes sobresalientes por grado (promedio ≥90) como gráfica
+			st.subheader('Estudiantes sobresalientes por grado (promedio ≥90)')
+			col_tipo_sob, col_pal_sob = st.columns([1,1])
+			tipo_graf_sob = col_tipo_sob.selectbox('Tipo de gráfica', ['Barras', 'Pastel'], key='tipo_sobresalientes')
+			paleta_sob = col_pal_sob.selectbox('Paleta de colores', ['Plotly','Viridis','Cividis','Inferno','Blues','Pastel'], key='paleta_sobresalientes')
+			if 'grado' in cal_clean.columns and 'promedio_general' in cal_clean.columns:
+				sobresalientes_grado = cal_clean[cal_clean['promedio_general']>=90].groupby('grado').size().reset_index(name='sobresalientes')
+				pal_colors_sob = get_palette(paleta_sob, max(3, sobresalientes_grado.shape[0]))
+				if tipo_graf_sob == 'Barras':
+					fig_sob = px.bar(sobresalientes_grado, x='grado', y='sobresalientes', title='Sobresalientes por grado', labels={'sobresalientes':'Cantidad'}, color='grado', color_discrete_sequence=pal_colors_sob)
+					st.plotly_chart(fig_sob, use_container_width=True)
+				else:
+					fig_sob = px.pie(sobresalientes_grado, names='grado', values='sobresalientes', title='Sobresalientes por grado', color_discrete_sequence=pal_colors_sob)
+					st.plotly_chart(fig_sob, use_container_width=True)
+
+
+			# Exportar tabla de reprobación por materia solo si existe
+			if 'reprob_materia' in locals():
+				st.download_button('Descargar reprobación por materia (CSV)', data=reprob_materia.to_csv(index=False).encode('utf-8'), file_name='reprobacion_materia.csv', mime='text/csv')
 
 			return
 
