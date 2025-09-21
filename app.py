@@ -703,9 +703,6 @@ def main():
 					st.plotly_chart(fig_sob, use_container_width=True)
 
 
-			# Exportar tabla de reprobación por materia solo si existe
-			if 'reprob_materia' in locals():
-				st.download_button('Descargar reprobación por materia (CSV)', data=reprob_materia.to_csv(index=False).encode('utf-8'), file_name='reprobacion_materia.csv', mime='text/csv')
 
 			return
 
